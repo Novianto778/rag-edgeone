@@ -1,0 +1,203 @@
+/* ── Citation Card ──────────────────────── */
+.citation-card {
+  position: relative;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin-top: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.citation-card:hover {
+  border-color: var(--border-accent);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.1);
+}
+
+/* ── Accent Strip (left) ─────────── */
+.citation-accent-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--accent);
+  z-index: 2;
+}
+
+/* ── Citation Body ─────────────────────── */
+.citation-body {
+  padding: 14px 16px 14px 20px;
+}
+
+/* ── Header ────────────────────────────── */
+.citation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.citation-doc-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.citation-doc-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.citation-doc-name {
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.citation-badge {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: #1e40af;
+  background: #e0e7ff;
+  border: 1px solid #c7d2fe;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Meta Info ─────────────────────────── */
+.citation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.citation-meta-item {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.citation-meta-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* ── Page Items ────────────────────────── */
+.citation-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.citation-page-item {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+
+.citation-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #f1f5f9;
+  border-bottom: 1px solid var(--border);
+}
+
+.citation-page-number {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.citation-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.citation-copy-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  transition: all var(--transition);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.citation-copy-btn:hover {
+  color: var(--text-primary);
+  background: #ffffff;
+}
+
+.citation-copy-btn.copied {
+  color: var(--success);
+}
+
+.citation-expand-btn {
+  font-size: 0.7rem;
+  padding: 3px 8px;
+  border-radius: 3px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+  font-weight: 500;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.citation-expand-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── Page Content ──────────────────────── */
+.citation-page-content {
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 150px;
+  overflow: hidden;
+  position: relative;
+  transition: max-height 0.35s ease;
+}
+
+.citation-page-content.expanded {
+  max-height: none;
+}
+
+.citation-page-content:not(.expanded)::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 35px;
+  background: linear-gradient(transparent, #f8fafc);
+  pointer-events: none;
+}

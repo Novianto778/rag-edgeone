@@ -1,20 +1,19 @@
 /**
- * Chat handler -- EdgeOne Makers
+ * Enterprise RAG Chat Handler -- EdgeOne Makers (TypeScript)
  *
  * File path agents/chat/index.ts maps to POST /chat.
- * It streams OpenAI-compatible chat/completions responses, executes EdgeOne
- * sandbox tools when requested, and stores conversation history.
+ * Streams OpenAI-compatible chat/completions responses, executes the
+ * `query_knowledge_base` RAG tool, and persists conversation memory.
  */
 
 import { getModelConfig } from '../_model';
 import { createLogger } from '../_logger';
 import { ChatSession } from '../_session';
 import { buildTools, stringifyResult } from '../_tools';
-import { extractImagesFromToolResult } from './_images';
 
 const logger = createLogger('chat');
 const encoder = new TextEncoder();
-const MAX_TOOL_ROUNDS = 3;
+const MAX_TOOL_ROUNDS = 4;
 
 const SSE_HEADERS = {
   'Content-Type': 'text/event-stream; charset=utf-8',
@@ -24,36 +23,20 @@ const SSE_HEADERS = {
 };
 
 const SYSTEM_PROMPT = [
-  'You are an EdgeOne Makers Node.js starter example: an out-of-the-box Agent template that helps developers quickly run through and validate platform capabilities. This template shows how to call an OpenAI-compatible Chat Completions API directly with raw `fetch`, no agent SDK.',
-  'When introducing yourself, clearly say that you are a demo Agent built with raw Node.js (no SDK, just OpenAI-compatible fetch + function calling) on EdgeOne Makers, designed to showcase tool calling, streaming responses, and session memory for developers.',
-  'The runtime exposes a set of platform tools via function calling — their exact',
-  'names, descriptions, and parameter schemas are provided alongside this message.',
-  'Read each tool\'s schema before calling it; do not assume names or parameters.',
+  'You are an enterprise knowledge base assistant running inside an EdgeOne Makers environment.',
+  'Your objective is to answer user questions with accurate, grounded information retrieved directly from the Qdrant Cloud knowledge base.',
   '',
-  'Tool families you may see (the runtime may expose multiple fine-grained tools per family,',
-  'e.g. `browser_fetch`, `files_read`, `commands_run`, `code_interpreter_python`):',
-  '- commands / shell: execute shell commands in the sandbox (e.g. date, ls, uname, curl).',
-  '- files / fs: read, write, list, check, remove, or create files and directories.',
-  '- code_interpreter / interpreter: run code in an isolated interpreter (python, javascript, bash, ...).',
-  '- browser: fetch web pages, take screenshots, click, type, evaluate scripts.',
-  '',
-  'Tool-use rules:',
-  '1. Use a tool only when it is necessary to answer the user concretely.',
-  '2. Call tools one at a time and wait for each result before deciding the next step.',
-  '3. Never invent, simulate, or paraphrase tool results. If a tool result is unavailable, say so.',
-  '4. If a tool call fails, do not repeat it blindly and do not switch to unrelated operations.',
-  '   Briefly explain the failure, adjust the parameters only if the fix is clear, otherwise ask the user for guidance.',
-  '5. Do not perform destructive file or shell operations unless the user explicitly asks for them.',
-  '6. If the task can be answered without tools, answer directly and keep the response concise.',
-  'Only call tools that appear in the function-calling schema provided to you.',
+  'Retrieval Workflow:',
+  '1. When the user asks a question, call the `query_knowledge_base(query)` tool to perform Qdrant search followed by Voyage AI reranking.',
+  '2. Base your final answer strictly on the top-ranked parent section Markdown contents returned by the tool.',
+  '3. Respond clearly in the same language as the user\'s question.',
+  '4. Do NOT insert inline citations like [Doc, p.3] into your prose answer text; the UI automatically renders verified citation source cards separately below your response.',
+  '5. If the retrieved sections do not contain enough information to answer the question, state that clearly without inventing facts or prior assumptions.',
+  '6. Never invent document names, page numbers, citations, or unsupported facts.',
 ].join('\n');
 
 type ChatMessage = Record<string, any>;
 type ToolRegistry = ReturnType<typeof buildTools>;
-type TraceSpan = {
-  setAttributes?: (attributes: Record<string, unknown>) => void;
-  end?: () => void;
-};
 
 interface Usage {
   prompt_tokens: number;
@@ -74,7 +57,9 @@ interface StreamChunk {
 }
 
 function sseFrame(event: string, data: Record<string, unknown>): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  // We include `type` inside data so both data: {...} and event: ... consumers work flawlessly
+  const payload = { type: event, ...data };
+  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
 function sendEvent(
@@ -85,27 +70,16 @@ function sendEvent(
   controller.enqueue(encoder.encode(sseFrame(event, data)));
 }
 
-function sseResponse(event: string, data: Record<string, unknown>, includeDone = false): Response {
-  const body = sseFrame(event, data) + (includeDone ? sseFrame('done', {}) : '');
+function sseResponse(event: string, data: Record<string, unknown>): Response {
+  const body = sseFrame(event, data) + sseFrame('finish', { stopped: false });
   return new Response(encoder.encode(body), { status: 200, headers: SSE_HEADERS });
 }
 
-function redactBase64Image(text: string): string {
-  return text.replace(/"base64Image"\s*:\s*"[A-Za-z0-9+/=]{100,}"/g, '"base64Image":"[REDACTED image data]"');
-}
-
-function safeJsonPreview(value: unknown, maxLength = 1200): string {
-  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? '';
-  const redacted = redactBase64Image(text);
-  return redacted.length > maxLength ? `${redacted.slice(0, maxLength)}...<truncated>` : redacted;
-}
-
-function buildPayload(model: string, messages: ChatMessage[], toolRegistry: ToolRegistry): ChatMessage {
-  const payload: ChatMessage = {
+function buildPayload(model: string, messages: ChatMessage[], toolRegistry: ToolRegistry): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
     model,
     messages,
     stream: true,
-    stream_options: { include_usage: true },
   };
 
   if (toolRegistry.hasTools()) {
@@ -119,218 +93,153 @@ function buildPayload(model: string, messages: ChatMessage[], toolRegistry: Tool
 function assistantToolMessage(content: string, toolCalls: ToolCallAcc[]): ChatMessage {
   return {
     role: 'assistant',
-    content,
-    tool_calls: toolCalls.map(tc => ({
+    content: content || null,
+    tool_calls: toolCalls.map((tc) => ({
       id: tc.id,
       type: 'function',
-      function: { name: tc.name, arguments: tc.arguments },
+      function: {
+        name: tc.name,
+        arguments: tc.arguments,
+      },
     })),
   };
 }
 
-async function loadHistoryAndSaveUser(context: any, session: ChatSession, cid: string, message: string) {
-  const span: TraceSpan | undefined = context.tracer?.startSpan('session.load_and_save', {
-    'session.conversation_id': cid,
-  });
-
-  try {
-    const [history] = await Promise.all([
-      session.getHistory(cid),
-      session.saveUserMessage(cid, message),
-    ]);
-    span?.setAttributes?.({ 'session.history_count': history.length });
-    return history;
-  } finally {
-    span?.end?.();
-  }
-}
-
-function createToolRegistry(context: any): ToolRegistry {
-  const span: TraceSpan | undefined = context.tracer?.startSpan('tools.build');
-
-  try {
-    const registry = buildTools(context, logger);
-    span?.setAttributes?.({
-      'tools.count': registry.tools.length,
-      'tools.has_tools': registry.hasTools(),
-    });
-    return registry;
-  } finally {
-    span?.end?.();
-  }
-}
-
-async function* parseStreamWithTools(response: Response, signal?: AbortSignal): AsyncGenerator<StreamChunk> {
+async function* parseStreamWithTools(
+  response: Response,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamChunk> {
   const reader = response.body?.getReader();
   if (!reader) return;
 
   const decoder = new TextDecoder();
-  const toolCalls = new Map<number, ToolCallAcc>();
   let buffer = '';
-  let finishReason = '';
-  let usage: Usage | undefined;
+  const toolCallsAcc = new Map<number, ToolCallAcc>();
 
   try {
-    while (!signal?.aborted) {
+    while (true) {
+      if (signal?.aborted) return;
+
       const { done, value } = await reader.read();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      buffer = lines.pop() ?? '';
 
-      let streamDone = false;
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (trimmed === 'data: [DONE]') {
-          streamDone = true;
-          break;
+        if (!trimmed || !trimmed.startsWith('data:')) continue;
+
+        const dataStr = trimmed.slice(5).trim();
+        if (dataStr === '[DONE]') {
+          if (toolCallsAcc.size > 0) {
+            yield { toolCalls: Array.from(toolCallsAcc.values()) };
+          }
+          return;
         }
-        if (!trimmed.startsWith('data: ')) continue;
 
-        const chunk = parseSseJson(trimmed.slice(6));
-        if (chunk?.usage) usage = chunk.usage;
+        let parsed: any;
+        try {
+          parsed = JSON.parse(dataStr);
+        } catch {
+          continue;
+        }
 
-        const choice = chunk?.choices?.[0];
+        const choice = parsed.choices?.[0];
+        if (parsed.usage) {
+          yield { usage: parsed.usage };
+        }
+
         if (!choice) continue;
 
-        if (choice.finish_reason) finishReason = choice.finish_reason;
+        const delta = choice.delta;
+        if (!delta) continue;
 
-        const delta = choice.delta ?? {};
         if (delta.content) {
           yield { contentDelta: delta.content };
         }
-        collectToolCallDeltas(toolCalls, delta.tool_calls);
-      }
 
-      if (streamDone) break;
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            const existing = toolCallsAcc.get(idx) || {
+              id: tc.id || '',
+              name: tc.function?.name || '',
+              arguments: '',
+            };
+
+            if (tc.id) existing.id = tc.id;
+            if (tc.function?.name) existing.name = tc.function.name;
+            if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+
+            toolCallsAcc.set(idx, existing);
+          }
+        }
+      }
+    }
+
+    if (toolCallsAcc.size > 0) {
+      yield { toolCalls: Array.from(toolCallsAcc.values()) };
     }
   } finally {
     reader.releaseLock();
   }
-
-  if (toolCalls.size > 0 && finishReason === 'tool_calls') {
-    yield { toolCalls: [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, tc]) => tc), usage };
-  } else if (usage) {
-    yield { usage };
-  }
-}
-
-function parseSseJson(json: string): any | null {
-  try {
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-
-function collectToolCallDeltas(toolCalls: Map<number, ToolCallAcc>, deltas: any[] | undefined) {
-  if (!deltas) return;
-
-  for (const delta of deltas) {
-    const index = delta?.index ?? 0;
-    const toolCall = toolCalls.get(index) ?? { id: '', name: '', arguments: '' };
-
-    if (delta?.id) toolCall.id = delta.id;
-    if (delta?.function?.name) toolCall.name = delta.function.name;
-    if (delta?.function?.arguments) toolCall.arguments += delta.function.arguments;
-
-    toolCalls.set(index, toolCall);
-  }
 }
 
 async function streamModelRound(params: {
-  context: any;
   url: string;
-  model: string;
   apiKey: string;
-  payload: ChatMessage;
+  payload: Record<string, unknown>;
   round: number;
   signal?: AbortSignal;
   controller: ReadableStreamDefaultController<Uint8Array>;
   onTextDelta: (delta: string) => void;
-}): Promise<{ content: string; toolCalls: ToolCallAcc[] | null; stopped: boolean; failed: boolean }> {
-  const { context, url, model, apiKey, payload, round, signal, controller, onTextDelta } = params;
-  const span: TraceSpan | undefined = context.tracer?.startSpan(`llm.request.round_${round}`, {
-    'openinference.span.kind': 'LLM',
-    'llm.model_name': model,
-    'llm.provider': 'openai',
-    'llm.request.type': 'chat',
-    'llm.request.message_count': payload.messages.length,
-    'llm.request.tools_included': 'tools' in payload,
-    'llm.request.round': round,
-  });
+}): Promise<{
+  content: string;
+  toolCalls?: ToolCallAcc[];
+  stopped: boolean;
+  failed: boolean;
+}> {
+  const { url, apiKey, payload, signal, controller, onTextDelta } = params;
 
   let content = '';
-  let toolCalls: ToolCallAcc[] | null = null;
+  let toolCalls: ToolCallAcc[] | undefined;
   let stopped = false;
   let failed = false;
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(payload),
-      signal,
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    logger.error(`LLM gateway error HTTP ${response.status}:`, detail);
+    sendEvent(controller, 'error', {
+      errorText: `LLM gateway error HTTP ${response.status}: ${detail}`,
     });
+    return { content, toolCalls, stopped, failed: true };
+  }
 
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      logger.error(`[handler] LLM API error: ${response.status} ${errorBody}`);
-      span?.setAttributes?.({ 'http.status_code': response.status, 'llm.error': true });
-
-      // Try to parse upstream body as JSON so TracePanel can render it structured
-      let detail: unknown = errorBody;
-      try {
-        detail = errorBody ? JSON.parse(errorBody) : '';
-      } catch {
-        // keep raw string
-      }
-
-      sendEvent(controller, 'error', {
-        message: `LLM API error: ${response.status}`,
-        status: response.status,
-        statusText: response.statusText,
-        round,
-        model,
-        detail,
-      });
-      return { content, toolCalls, stopped, failed: true };
+  for await (const chunk of parseStreamWithTools(response, signal)) {
+    if (signal?.aborted) {
+      stopped = true;
+      break;
     }
 
-    span?.setAttributes?.({ 'http.status_code': 200 });
-
-    for await (const chunk of parseStreamWithTools(response, signal)) {
-      if (signal?.aborted) {
-        stopped = true;
-        break;
-      }
-
-      if (chunk.contentDelta) {
-        content += chunk.contentDelta;
-        onTextDelta(chunk.contentDelta);
-      }
-      if (chunk.toolCalls) {
-        toolCalls = chunk.toolCalls;
-      }
-      if (chunk.usage) {
-        span?.setAttributes?.({
-          'llm.token_count.prompt': chunk.usage.prompt_tokens,
-          'llm.token_count.completion': chunk.usage.completion_tokens,
-          'llm.token_count.total': chunk.usage.total_tokens,
-        });
-      }
+    if (chunk.contentDelta) {
+      content += chunk.contentDelta;
+      onTextDelta(chunk.contentDelta);
     }
-  } finally {
-    span?.setAttributes?.({
-      'llm.response.content_length': content.length,
-      'llm.response.has_tool_calls': !!toolCalls,
-    });
-    span?.end?.();
+    if (chunk.toolCalls) {
+      toolCalls = chunk.toolCalls;
+    }
   }
 
   return { content, toolCalls, stopped, failed };
@@ -341,88 +250,41 @@ function emitToolCallEvents(
   toolCalls: ToolCallAcc[],
 ) {
   for (const tc of toolCalls) {
-    sendEvent(controller, 'tool_called', { tool: tc.name });
-    sendEvent(controller, 'tool_debug', {
-      phase: 'call',
-      tool: tc.name,
-      id: tc.id,
-      argumentsPreview: safeJsonPreview(tc.arguments),
+    sendEvent(controller, 'tool-input-available', {
+      toolCallId: tc.id,
+      toolName: tc.name,
+      input: tc.arguments,
     });
+    sendEvent(controller, 'tool_called', { tool: tc.name });
   }
 }
 
 async function executeToolCalls(params: {
-  context: any;
   toolRegistry: ToolRegistry;
   toolCalls: ToolCallAcc[];
   controller: ReadableStreamDefaultController<Uint8Array>;
 }): Promise<string[]> {
-  const { context, toolRegistry, toolCalls, controller } = params;
-  const spans = toolCalls.map(tc => context.tracer?.startSpan(`tool.${tc.name}`, {
-    'tool.name': tc.name,
-    'tool.call_id': tc.id,
-    'tool.arguments_length': tc.arguments.length,
-  }));
+  const { toolRegistry, toolCalls, controller } = params;
 
-  try {
-    return await Promise.all(toolCalls.map(async (tc, index) => {
-      const startedAt = Date.now();
-
-      // Pull the raw handler value so we can sniff for base64 images BEFORE
-      // it gets serialized into the next-round `tool` message. Anything we
-      // find is replaced with a `[image:<id>]` placeholder; the redacted
-      // structure is what flows back into the model context.
+  return await Promise.all(
+    toolCalls.map(async (tc) => {
       const raw = await toolRegistry.executeRaw(tc.name, tc.arguments);
-      const { images, redactedResult, truncated } = extractImagesFromToolResult(raw);
-      const result = stringifyResult(redactedResult);
-      const durationMs = Date.now() - startedAt;
-      const resultPreview = safeJsonPreview(result, 2000);
-      const isError = result.includes('"error"');
+      const result = stringifyResult(raw);
 
-      // SSE ordering contract: image events fire AFTER `tool_debug{phase:'call'}`
-      // (already emitted by emitToolCallEvents) and BEFORE
-      // `tool_debug{phase:'result'}`. The frontend uses this to attach images
-      // to the in-flight tool row.
-      for (const img of images) {
-        sendEvent(controller, 'image', {
-          imageId:    img.imageId,
-          base64:     img.base64,
-          mimeType:   img.mimeType,
-          size:       img.size,
-          toolName:   tc.name,
-          toolCallId: tc.id,
-        });
-      }
-
-      spans[index]?.setAttributes?.({
-        'tool.result_length': result.length,
-        'tool.images_extracted': images.length,
-        'tool.images_truncated': truncated,
-      });
-      sendEvent(controller, 'tool_debug', {
-        phase: 'result',
-        tool: tc.name,
-        id: tc.id,
-        resultPreview,
-        resultLength: result.length,
-        durationMs,
-        imageCount: images.length,
-        ...(truncated ? { imagesTruncated: true } : {}),
-        ...(isError ? { error: resultPreview } : {}),
+      sendEvent(controller, 'tool-output-available', {
+        toolCallId: tc.id,
+        toolName: tc.name,
+        output: result,
       });
 
       return result;
-    }));
-  } finally {
-    for (const span of spans) {
-      span?.end?.();
-    }
-  }
+    }),
+  );
 }
 
 function appendToolResults(messages: ChatMessage[], toolCalls: ToolCallAcc[], results: string[]) {
   for (let i = 0; i < toolCalls.length; i++) {
-    logger.log(`[tool] ${toolCalls[i].name}: ${results[i].slice(0, 200)}`);
+    logger.log(`[tool] ${toolCalls[i].name} returned ${results[i].length} chars`);
     messages.push({
       role: 'tool',
       tool_call_id: toolCalls[i].id,
@@ -431,35 +293,57 @@ function appendToolResults(messages: ChatMessage[], toolCalls: ToolCallAcc[], re
   }
 }
 
+async function loadHistoryAndSaveUser(
+  context: any,
+  session: ChatSession,
+  cid: string,
+  message: string,
+): Promise<ChatMessage[]> {
+  if (!cid) return [];
+  const history = await session.getHistory(cid);
+  await session.saveUserMessage(cid, message);
+  return history;
+}
+
 export async function onRequest(context: any) {
-  const cid: string = context.conversation_id ?? '';
-  const rawMessage = context.request.body?.message;
+  const cid: string =
+    context.conversation_id ||
+    context.request?.headers?.get?.('makers-conversation-id') ||
+    '';
+
+  let rawMessage = '';
+  try {
+    if (context.request?.body?.message) {
+      rawMessage = context.request.body.message;
+    } else if (typeof context.request?.json === 'function') {
+      const body = await context.request.json().catch(() => ({}));
+      rawMessage = body?.message || '';
+    }
+  } catch {
+    rawMessage = '';
+  }
 
   logger.log(`[handler] conversation_id: ${cid}`);
-  context.tracer?.setAttributes({
-    'agent.scenario': 'node_starter_chat',
-    'chat.conversation_id': cid,
-    'chat.has_message': !!rawMessage,
-  });
 
   if (typeof rawMessage !== 'string' || rawMessage.trim().length === 0) {
-    return sseResponse('error', { message: 'message is required' }, true);
+    return sseResponse('error', { errorText: 'message is required' });
   }
 
   const message = rawMessage.slice(0, 10000);
-  const signal: AbortSignal | undefined = context.request.signal;
-  const session = new ChatSession(context.store);
+  const signal: AbortSignal | undefined = context.request?.signal;
+  const session = new ChatSession(context.agent?.store || context.store);
   const history = await loadHistoryAndSaveUser(context, session, cid, message);
-  const toolRegistry = createToolRegistry(context);
+  const toolRegistry = buildTools(context, logger);
+
   const messages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
     ...history,
     { role: 'user', content: message },
   ];
 
-  const modelConfig = getModelConfig(context.env);
+  const modelConfig = getModelConfig(context.env || process.env);
   const url = `${modelConfig.baseUrl.replace(/\/$/, '')}/chat/completions`;
-  logger.log(`[handler] streaming from: ${url}, model: ${modelConfig.model}, tools: ${toolRegistry.hasTools()}`);
+  logger.log(`[handler] streaming from: ${url}, model: ${modelConfig.model}`);
 
   let assistantContent = '';
   let stopped = false;
@@ -468,11 +352,14 @@ export async function onRequest(context: any) {
     async start(controller) {
       if (!modelConfig.apiKey || !modelConfig.baseUrl) {
         sendEvent(controller, 'error', {
-          message: 'AI Gateway not configured. Set AI_GATEWAY_API_KEY and AI_GATEWAY_BASE_URL.',
+          errorText: 'AI Gateway not configured. Set AI_GATEWAY_API_KEY and AI_GATEWAY_BASE_URL.',
         });
         controller.close();
         return;
       }
+
+      // Send initial start event
+      sendEvent(controller, 'start', { messageId: cid });
 
       try {
         for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
@@ -485,9 +372,7 @@ export async function onRequest(context: any) {
           logger.log(`[handler] round ${round}, messages: ${messages.length}`);
 
           const result = await streamModelRound({
-            context,
             url,
-            model: modelConfig.model,
             apiKey: modelConfig.apiKey,
             payload,
             round,
@@ -495,7 +380,7 @@ export async function onRequest(context: any) {
             controller,
             onTextDelta(delta) {
               assistantContent += delta;
-              sendEvent(controller, 'text_delta', { delta });
+              sendEvent(controller, 'text-delta', { delta });
             },
           });
 
@@ -507,7 +392,6 @@ export async function onRequest(context: any) {
           emitToolCallEvents(controller, result.toolCalls);
 
           const toolResults = await executeToolCalls({
-            context,
             toolRegistry,
             toolCalls: result.toolCalls,
             controller,
@@ -521,31 +405,20 @@ export async function onRequest(context: any) {
           logger.log('[stream] aborted by user');
         } else {
           logger.error('[stream] error:', error.message, error.stack);
-          context.tracer?.setAttributes({
-            'error.type': error.name || 'Error',
-            'error.message': error.message || String(e),
-          });
           sendEvent(controller, 'error', {
-            message: String(error.message ?? e),
-            name: error.name || 'Error',
-            stack: error.stack,
-            cause: (error as { cause?: unknown }).cause,
+            errorText: String(error.message ?? e),
           });
         }
       } finally {
-        if (assistantContent) {
-          const span: TraceSpan | undefined = context.tracer?.startSpan('session.save_assistant_message', {
-            'session.conversation_id': cid,
-            'session.content_length': assistantContent.length,
-          });
+        if (assistantContent && cid) {
           try {
             await session.saveAssistantMessage(cid, assistantContent);
-          } finally {
-            span?.end?.();
+          } catch (err) {
+            logger.warn('Failed to persist assistant message:', err);
           }
         }
 
-        sendEvent(controller, 'done', { stopped });
+        sendEvent(controller, 'finish', { stopped });
         controller.close();
       }
     },

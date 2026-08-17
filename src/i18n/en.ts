@@ -1,78 +1,71 @@
 const en = {
-  // Header
-  "app.title": "Node.js Starter",
-  "app.subtitle": "Node.js Starter -- EdgeOne Makers + Platform Tools",
+  // App header
+  "app.title": "Enterprise RAG Agent",
+  "app.subtitle": "Traceable Q&A powered by enterprise knowledge base",
 
-  // Empty state
-  "empty.title": "Node.js Starter",
-  "empty.hint": "I'm an Agent running on EdgeOne, using native fetch for streaming chat and tool calling loops. Supports commands, files, code_interpreter, and browser sandbox tools.",
-  "empty.features": "EdgeOne Store · Session Memory · Platform Tools",
+  // Knowledge Base Summary
+  "kb.title": "Knowledge Base",
+  "kb.documents": "Documents",
+  "kb.pages": "Pages",
+  "kb.dataSize": "Data Size",
+  "kb.indexed": "Indexed",
+  "kb.entries": "entries",
+  "kb.retry": "Retry",
 
-  // Chat input
-  "chat.placeholder": "Send a message... Enter to send, Shift+Enter for newline",
-  "chat.hint": "Raw fetch + tool loop · EdgeOne Platform Tools",
+  // RagChat
+  "chat.title": "Knowledge Query",
+  "chat.newSession": "New Session",
+  "chat.loadingHistory": "Loading conversation history...",
+  "chat.emptyTitle": "Ask about your knowledge base",
+  "chat.emptyDesc": "Query documents with full citation traceability",
+  "chat.placeholder": "Ask a question about your documents...",
+  "chat.streaming": "Retrieving & generating...",
+  "chat.stop": "Stop",
+  "chat.you": "You",
+  "chat.agent": "Agent",
+  "chat.error": "Request failed. Please check if the backend service is running.",
+  "chat.stopped": "⏹ *Generation stopped*",
 
   // Preset questions
-  "preset.1": "Use terminal commands to check the current system time and OS info",
-  "preset.2": "Create a hello.txt file in the sandbox with content \"Hello EdgeOne!\", then read it back",
-  "preset.3": "Use Python to calculate and print the first 20 Fibonacci numbers",
-  "preset.4": "Use the browser to fetch the page title of https://edgeone.ai",
+  "preset.1": "What is context.store provided by EdgeOne Makers?",
+  "preset.2": "What are EdgeOne Makers' file-based routing rules?",
 
-  // Tool indicators
-  "tool.commands": "Commands",
-  "tool.files": "Files",
-  "tool.codeRunner": "Code Runner",
-  "tool.browser": "Browser",
+  // Citation
+  "citation.badge": "VERIFIED SOURCE",
+  "citation.id": "ID:",
+  "citation.range": "Range:",
+  "citation.chars": "Chars:",
+  "citation.page": "Page",
+  "citation.expand": "Expand",
+  "citation.collapse": "Collapse",
+  "citation.unknownDoc": "Unknown Document",
 
-  // Status & errors
-  "status.error": "Request failed. Please check if the backend service is running.",
-  "status.stopped": " *Generation stopped*",
-  "status.backendError": "Backend abort request failed. The server may still be running.",
+  // Aria labels
+  "aria.refreshStats": "Refresh stats",
+  "aria.clearConversation": "Clear conversation",
+  "aria.copyContent": "Copy content",
 
   // Language toggle
   "lang.switch": "中文",
 
-  // Trace panel
-  "trace.title": "Trace",
-  "trace.events": "events",
-  "trace.clear": "Clear",
-  "trace.empty": "Waiting for SSE events...",
-  "trace.emptyHint": "After sending a message, raw backend SSE data will be displayed here.",
+  // Tabs navigation
+  "nav.documents": "Documents & Knowledge Base",
+  "nav.chat": "Ask AI Assistant",
 
-  // ─── REPL UI ─────────────────────────────────────────────────────────
-  "repl.motd.title": "Node LLM Agent · EdgeOne Makers Functions",
-  "repl.motd.tools": "Tools available: commands  files  code_interpreter  browser",
-  "repl.motd.help": "Type a question and press Enter. Ctrl+C aborts. Ctrl+L clears. Ctrl+T toggles trace. Ctrl+/ shows help.",
-  "repl.prompt.label": "user▸ ",
-  "repl.prompt.userLabel": "user▸ ",
-  "repl.prompt.agentLabel": "agent▸ ",
-  "repl.prompt.placeholder": "ask anything…",
-  "repl.status.idle": "idle",
-  "repl.status.running": "running",
-  "repl.status.aborted": "^C  aborted (frontend)",
-  "repl.status.stopOk": "backend stop ack",
-  "repl.status.stopFail": "backend stop FAILED",
-  "repl.status.cleared": "[cleared · server history kept]",
-  "repl.status.reset": "[session reset · new conversation_id]",
-  "repl.status.restored": "restored",
-  "repl.status.restoring": "… restoring conversation {id} ({n} messages) …",
-  "repl.status.restoringFallback": "… restoring conversation …",
-  "repl.status.verboseOn": "[verbose: raw SSE events]",
-  "repl.status.verboseOff": "[verbose: off]",
-  "repl.done.summary": "[done · {elapsed}s · {rounds} tool rounds]",
-  "repl.help.title": "commands & shortcuts",
-  "repl.help.body": "Enter — submit · Shift+Enter — newline · ↑/↓ — input history · Ctrl+C — abort/clear · Ctrl+L — clear screen · Ctrl+Shift+K — reset session · Ctrl+T — toggle trace · Ctrl+/ — this help",
+  // Document Upload & Management
+  "upload.title": "Upload & Ingest Documents",
+  "upload.dragDrop": "Drag & drop PDF or DOCX files here, or click to browse",
+  "upload.browse": "Browse Files",
+  "upload.hint": "Supports PDF and DOCX files. Automatically converted to Markdown, chunked & indexed for RAG.",
+  "upload.status.ready": "Ready",
+  "upload.status.parsing": "Parsing via Firecrawl...",
+  "upload.status.chunking": "Parent-Child Chunking...",
+  "upload.status.embedding": "Generating Embeddings...",
+  "upload.status.indexing": "Indexing in Qdrant...",
+  "docs.catalog": "Knowledge Base Documents",
+  "docs.empty": "No documents ingested yet. Upload a PDF/DOCX to get started.",
 
-  // ─── Image (tool output) ─────────────────────────────────────────────
-  "repl.image.open": "Open image (Esc to close)",
-
-  // ─── Pending caret (between submit and first agent output) ───────────
-  "repl.status.thinking": "thinking…",
-
-  // ─── Aria labels ─────────────────────────────────────────────────────
-  "aria.closeImagePreview": "Close image preview",
-
-  // ─── Floating bottom-right action badges ─────────────────────────────
+  // Floating links
   "floatingLink.deploy": "Deploy",
   "floatingLink.github": "GitHub",
 } as const;

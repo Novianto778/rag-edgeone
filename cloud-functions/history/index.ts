@@ -1,20 +1,7 @@
 /**
  * History handler — EdgeOne Makers Node Function
- * ==============================================
  *
- * File path cloud-functions/history/index.ts maps to **POST /history**.
- *
- * Reads conversation history from `context.agent.store.getMessages()` and
- * returns it to the frontend so the chat window can be restored after a
- * page refresh. This route lives in cloud-functions/ (stateless) rather
- * than agents/ (stateful) so it doesn't compete with the active /chat
- * SSE stream for runtime resources.
- *
- * Following the official EdgeOne Makers Node Functions docs:
- *   - export `onRequestPost` for POST handlers
- *   - read JSON body via `await context.request.json()`
- *   - return a `Response` object
- *   https://pages.edgeone.ai/document/node-functions
+ * File path cloud-functions/history/index.ts maps to POST /history and GET /history.
  */
 
 import { createLogger } from '../_logger';
@@ -57,13 +44,21 @@ function getConversationId(context: any, body: Record<string, unknown>): string 
   const fromBody = body.conversation_id ?? body.conversationId;
   if (typeof fromBody === 'string' && fromBody.trim()) return fromBody.trim();
 
-  // Backwards-compat: also accept the makers-conversation-id header used by /chat.
   try {
     const headerValue = context?.request?.headers?.get?.('makers-conversation-id');
     if (typeof headerValue === 'string' && headerValue.trim()) return headerValue.trim();
   } catch {
     /* noop */
   }
+
+  try {
+    const url = new URL(context.request.url);
+    const fromUrl = url.searchParams.get('conversation_id') || url.searchParams.get('conversationId');
+    if (fromUrl) return fromUrl.trim();
+  } catch {
+    /* noop */
+  }
+
   return '';
 }
 
@@ -83,7 +78,7 @@ function contentToText(content: unknown): string {
       .filter((item): item is Record<string, unknown> =>
         item !== null && typeof item === 'object',
       )
-      .map(item => String(item.text ?? item.output_text ?? ''))
+      .map((item) => String(item.text ?? item.output_text ?? ''))
       .filter(Boolean)
       .join('\n');
   }
@@ -91,19 +86,19 @@ function contentToText(content: unknown): string {
   return String(content);
 }
 
-export async function onRequestPost(context: any): Promise<Response> {
+async function handleHistory(context: any): Promise<Response> {
   const startTime = Date.now();
   logger.log(`[history] start: ${new Date(startTime).toISOString()}`);
 
   const body = await readJsonBody(context);
   const conversationId = getConversationId(context, body);
-  const { store } = context.agent;
+  const store = context.agent?.store || context.store;
 
   logger.log('conversationId:', conversationId || '-');
 
-  if (!conversationId) {
+  if (!conversationId || !store?.getMessages) {
     logger.log(
-      `[history] end: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms (no conversationId)`,
+      `[history] end: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms (no conversationId or store)`,
     );
     return jsonResponse({ conversation_id: conversationId, messages: [] });
   }
@@ -125,7 +120,7 @@ export async function onRequestPost(context: any): Promise<Response> {
 
       messages.push({
         id: item.messageId ?? `${role}-${item.createdAt ?? 0}`,
-        role,
+        role: role as 'user' | 'assistant',
         content,
         timestamp: item.createdAt ?? 0,
       });
@@ -140,4 +135,12 @@ export async function onRequestPost(context: any): Promise<Response> {
     logger.log(`[history] end: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms (error)`);
     return jsonResponse({ conversation_id: conversationId, messages: [] });
   }
+}
+
+export async function onRequestPost(context: any): Promise<Response> {
+  return handleHistory(context);
+}
+
+export async function onRequestGet(context: any): Promise<Response> {
+  return handleHistory(context);
 }

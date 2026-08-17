@@ -1,17 +1,19 @@
 /**
- * Tools module -- private module (starts with _), not mapped as a route.
+ * RAG & Platform Tool Definitions for EdgeOne Makers (TypeScript).
  *
- * Extracts EdgeOne platform tools from context.tools and passes them through
- * directly to the chat/completions API.
- *
- * EdgeOne provides sandbox tools: commands, files, code_interpreter, browser.
+ * Exposes the unified `query_knowledge_base` function calling tool
+ * which executes Mistral embedding, Qdrant Cloud search (Top-20),
+ * Voyage AI Rerank (rerank-2), and Parent Section deduplication.
  */
 
-type ToolSchema = Record<string, unknown>;
+import { createLogger } from './_logger';
+import { hybridSearchQdrant } from './_qdrant';
+import { rerankAndResolveParentSections } from './_reranker';
 
-/**
- * Registry holding tool schemas and handlers extracted from context.tools.
- */
+const logger = createLogger('tools');
+
+export type ToolSchema = Record<string, unknown>;
+
 export class ToolRegistry {
   tools: ToolSchema[] = [];
   private handlers: Map<string, (args: Record<string, unknown>) => unknown> = new Map();
@@ -31,12 +33,6 @@ export class ToolRegistry {
     return stringifyResult(raw);
   }
 
-  /**
-   * Like `execute`, but returns the raw handler value (or a structured error
-   * object) without stringification. The chat handler uses this to inspect
-   * the result for embedded base64 images BEFORE serialization, so they can
-   * be lifted out of the tool message and emitted as separate SSE events.
-   */
   async executeRaw(name: string, arguments_: string): Promise<unknown> {
     const handler = this.handlers.get(name);
     if (!handler) {
@@ -63,78 +59,6 @@ export class ToolRegistry {
   }
 }
 
-/**
- * Build a ToolRegistry from EdgeOne's context.tools.
- */
-export function buildTools(context: any, logger?: any): ToolRegistry {
-  const registry = new ToolRegistry();
-
-  const runtimeTools = context.tools;
-  if (logger) {
-    logger.log(`[tools] context.tools = ${runtimeTools}`);
-    logger.log(`[tools] context.tools type = ${typeof runtimeTools}`);
-  }
-
-  if (typeof runtimeTools.all !== 'function') {
-    if (logger) {
-      logger.log(`[tools] no EdgeOne platform tools available`);
-    }
-    return registry;
-  }
-
-  const rawTools = runtimeTools.all();
-  if (logger) {
-    logger.log(`[tools] raw_tools count: ${rawTools?.length ?? 0}`);
-  }
-
-  for (const item of rawTools || []) {
-    const name: string | undefined = item?.name ?? item?.function?.name;
-    const handler = item?.execute ?? item?.handler ?? item?.invoke;
-
-    if (logger) {
-      logger.log(`[tools] inspecting: name=${name}, callable=${typeof handler === 'function'}`);
-    }
-
-    if (!name || typeof handler !== 'function') {
-      if (logger) {
-        logger.log(`[tools] skipped: ${name || '<unknown>'}`);
-      }
-      continue;
-    }
-
-    // Build a clean OpenAI function-tool schema. Do NOT spread the raw item —
-    // EdgeOne tool items carry extra fields (execute, inputSchema, type='tool', etc.)
-    // that strict upstream gateways may reject, causing the whole `tools` array to be
-    // silently ignored and the model to answer without ever calling a tool.
-    const description: string =
-      item?.function?.description ?? item?.description ?? '';
-    const parameters: Record<string, unknown> =
-      item?.function?.parameters ??
-      item?.parameters ??
-      item?.inputSchema ??
-      item?.input_schema ??
-      { type: 'object', properties: {} };
-
-    registry.register(
-      name,
-      {
-        type: 'function',
-        function: {
-          name,
-          description,
-          parameters,
-        },
-      },
-      handler,
-    );
-    if (logger) {
-      logger.log(`[tools] registered: ${name}`);
-    }
-  }
-
-  return registry;
-}
-
 export function stringifyResult(result: unknown): string {
   if (typeof result === 'string') return result;
   try {
@@ -142,4 +66,132 @@ export function stringifyResult(result: unknown): string {
   } catch {
     return String(result);
   }
+}
+
+/**
+ * Executes the full query -> Qdrant search -> Voyage rerank -> Parent resolution pipeline.
+ */
+export async function executeQueryKnowledgeBase(query: string): Promise<string> {
+  const q = (query || '').trim();
+  logger.log(`query_knowledge_base called: query="${q}"`);
+
+  if (!q) {
+    return JSON.stringify({ error: 'Empty query string provided.' });
+  }
+
+  // 1. Qdrant Search (Top-20 Candidate Child Chunks)
+  const candidateChunks = await hybridSearchQdrant(q, 20);
+
+  if (!candidateChunks || candidateChunks.length === 0) {
+    logger.warn(`No Qdrant search results found for query: "${q}"`);
+    return JSON.stringify({
+      type: 'citation_pages',
+      query: q,
+      resultsCount: 0,
+      message: 'No matching knowledge base content found in Qdrant vector database.',
+      content: [],
+    });
+  }
+
+  // 2. Voyage AI Reranking & Parent Section Resolution (Top-5 Parent Chunks)
+  const parentSections = await rerankAndResolveParentSections(q, candidateChunks, 5);
+
+  // Format result payload for LLM context and citation rendering
+  const formattedContent = parentSections.map((p, idx) => ({
+    page: idx + 1,
+    docId: p.docId,
+    docName: p.docName,
+    sectionPath: p.sectionPath,
+    content: p.content,
+    preview: p.content.slice(0, 400),
+    rerankScore: p.rerankScore,
+  }));
+
+  const firstDocId = parentSections[0]?.docId || 'knowledge_base';
+  const firstDocName = parentSections[0]?.docName || 'Knowledge Base';
+
+  return JSON.stringify({
+    type: 'citation_pages',
+    docId: firstDocId,
+    docName: firstDocName,
+    query: q,
+    pageCount: parentSections.length,
+    totalChars: parentSections.reduce((acc, p) => acc + p.content.length, 0),
+    content: formattedContent,
+  });
+}
+
+/**
+ * Build a ToolRegistry containing RAG query_knowledge_base and any optional platform tools.
+ */
+export function buildTools(context?: any, customLogger?: any): ToolRegistry {
+  const registry = new ToolRegistry();
+  const log = customLogger || logger;
+
+  // Register RAG query_knowledge_base tool
+  registry.register(
+    'query_knowledge_base',
+    {
+      type: 'function',
+      function: {
+        name: 'query_knowledge_base',
+        description:
+          'Query the Qdrant Cloud enterprise knowledge base using vector search and Voyage AI reranking. Returns top-ranked parent section Markdown contents with citation provenance.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: "User's search question or inquiry to look up in the knowledge base",
+            },
+          },
+          required: ['query'],
+        },
+      },
+    },
+    async (args: Record<string, unknown>) => {
+      const query = String(args.query || args.q || '');
+      return executeQueryKnowledgeBase(query);
+    }
+  );
+
+  log.log('[tools] registered: query_knowledge_base');
+
+  // Register any EdgeOne sandbox platform tools if present
+  const runtimeTools = context?.tools;
+  if (runtimeTools && typeof runtimeTools.all === 'function') {
+    const rawTools = runtimeTools.all();
+    for (const item of rawTools || []) {
+      const name: string | undefined = item?.name ?? item?.function?.name;
+      const handler = item?.execute ?? item?.handler ?? item?.invoke;
+
+      if (!name || typeof handler !== 'function' || name === 'query_knowledge_base') {
+        continue;
+      }
+
+      const description: string = item?.function?.description ?? item?.description ?? '';
+      const parameters: Record<string, unknown> =
+        item?.function?.parameters ??
+        item?.parameters ??
+        item?.inputSchema ??
+        item?.input_schema ??
+        { type: 'object', properties: {} };
+
+      registry.register(
+        name,
+        {
+          type: 'function',
+          function: {
+            name,
+            description,
+            parameters,
+          },
+        },
+        handler
+      );
+      log.log(`[tools] registered platform tool: ${name}`);
+    }
+  }
+
+  return registry;
 }

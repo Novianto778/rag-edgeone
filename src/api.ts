@@ -1,53 +1,66 @@
 /**
- * Backend API (EdgeOne Makers)
- *
- * Route mapping (file → route):
- *   agents/chat/index.ts             → POST /chat          Main chat endpoint (SSE streaming)
- *   agents/chat/stop.ts              → POST /chat/stop     Abort the active agent run
- *   cloud-functions/history/index.ts → POST /history       Get conversation history (stateless cloud function)
- *
- * This file defines all API paths and request wrappers.
+ * Frontend API Client for EdgeOne Makers RAG Agent
  */
-
-import type { Message, ImageSsePayload } from './types';
 
 export const API = {
   chat: '/chat',
-  chatStop: '/chat/stop',
+  stop: '/stop',
   history: '/history',
+  upload: '/upload',
+  listDocuments: '/list-documents',
+  deleteDocument: '/delete-document',
 } as const;
 
-export interface RawSseEvent {
-  eventType: string;
-  data: unknown;
-  raw: string;
+export interface HistoryMessage {
+  id: string;
+  role: string;
+  content: string;
   timestamp: number;
 }
 
 export interface StreamCallbacks {
-  onTextDelta: (delta: string) => void;
-  onToolCalled: (toolName: string) => void;
-  onImage: (payload: ImageSsePayload) => void;
-  onDone: () => void;
-  onError: (err: Error) => void;
-  onRawEvent?: (event: RawSseEvent) => void;
+  onTextDelta?: (delta: string) => void;
+  onToolInput?: (toolCallId: string, toolName: string, input: string) => void;
+  onToolOutput?: (toolCallId: string, output: string) => void;
+  onFinish?: (stopped?: boolean) => void;
+  onError?: (err: Error) => void;
 }
 
-/** Get conversation history for restoring the chat window after page refresh. */
-export async function fetchConversationHistory(conversationId: string): Promise<Message[]> {
+export interface SendMessageOptions {
+  endpoint?: string;
+}
+
+interface SSEEvent {
+  type: string;
+  delta?: string;
+  toolCallId?: string;
+  toolName?: string;
+  input?: string;
+  output?: string;
+  stopped?: boolean;
+  errorText?: string;
+  messageId?: string;
+  id?: string;
+}
+
+/**
+ * Get conversation history (for restoring chat after page refresh).
+ */
+export async function fetchConversationHistory(
+  conversationId: string,
+): Promise<HistoryMessage[]> {
+  if (!conversationId) return [];
+
   try {
     const res = await fetch(API.history, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'makers-conversation-id': conversationId,
-      },
-      body: JSON.stringify({}),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId }),
     });
 
     if (!res.ok) return [];
 
-    const data = await res.json().catch(() => null) as { messages?: Message[] } | null;
+    const data = await res.json().catch(() => null);
     return Array.isArray(data?.messages) ? data.messages : [];
   } catch {
     return [];
@@ -55,17 +68,16 @@ export async function fetchConversationHistory(conversationId: string): Promise<
 }
 
 /**
- * Stream POST /chat via SSE
- * Backend pushes events: text_delta / tool_called / image / done / error
- *
- * Returns an AbortController the caller can use to abort the request (or pair with /chat/stop for graceful abort).
+ * Send a message and receive streaming response.
  */
 export function sendMessageStream(
   message: string,
   callbacks: StreamCallbacks,
-  conversationId?: string,
+  conversationId: string,
+  options: SendMessageOptions = {},
 ): AbortController {
   const ctrl = new AbortController();
+  const endpoint = options.endpoint || API.chat;
 
   (async () => {
     try {
@@ -76,7 +88,7 @@ export function sendMessageStream(
         headers['makers-conversation-id'] = conversationId;
       }
 
-      const res = await fetch(API.chat, {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify({ message }),
@@ -84,19 +96,21 @@ export function sendMessageStream(
       });
 
       if (!res.ok) {
-        callbacks.onError(new Error(`HTTP ${res.status}: ${await res.text().catch(() => '')}`));
+        callbacks.onError?.(
+          new Error(`HTTP ${res.status}: ${await res.text().catch(() => '')}`),
+        );
         return;
       }
 
       const reader = res.body?.getReader();
       if (!reader) {
-        callbacks.onError(new Error('ReadableStream not supported'));
+        callbacks.onError?.(new Error('ReadableStream not supported'));
         return;
       }
 
       const decoder = new TextDecoder();
       let buffer = '';
-      let doneReceived = false;
+      let finishReceived = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -104,124 +118,92 @@ export function sendMessageStream(
 
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE format: each event ends with \n\n
+        // SSE format: events separated by \n\n
         const parts = buffer.split('\n\n');
+        // Last segment may be incomplete — keep in buffer
         buffer = parts.pop() || '';
 
         for (const part of parts) {
-          if (!part.trim()) continue;
-          dispatchSseChunk(part, callbacks, () => { doneReceived = true; });
+          const trimmed = part.trim();
+          if (!trimmed) continue;
+
+          // Parse "data: {...}" line
+          const dataLine = trimmed
+            .split('\n')
+            .find((line) => line.startsWith('data: '));
+          if (!dataLine) continue;
+
+          try {
+            const event: SSEEvent = JSON.parse(dataLine.slice(6));
+            dispatchEvent(event, callbacks, () => {
+              finishReceived = true;
+            });
+          } catch {
+            // Ignore parse errors
+          }
         }
       }
 
-      if (!doneReceived) {
-        callbacks.onDone();
+      // Fallback: trigger finish if backend didn't send finish event
+      if (!finishReceived) {
+        callbacks.onFinish?.();
       }
     } catch (err) {
+      // AbortError does not trigger error callback
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      callbacks.onError(err instanceof Error ? err : new Error(String(err)));
+      callbacks.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
   })();
 
   return ctrl;
 }
 
-/** Parse a single SSE event and dispatch to the corresponding callback */
-function dispatchSseChunk(part: string, cb: StreamCallbacks, markDone: () => void): void {
-  let eventType = '';
-  let data = '';
+/**
+ * Parse a single SSE event and dispatch to the corresponding callback.
+ */
+function dispatchEvent(
+  event: SSEEvent,
+  callbacks: StreamCallbacks,
+  markFinish: () => void,
+): void {
+  if (!event || !event.type) return;
 
-  for (const line of part.split('\n')) {
-    if (line.startsWith('event: ')) {
-      eventType = line.slice(7);
-    } else if (line.startsWith('data: ')) {
-      data += (data ? '\n' : '') + line.slice(6);
-    }
-  }
-
-  if (!eventType || !data) return;
-
-  try {
-    const parsed = JSON.parse(data);
-
-    if (cb.onRawEvent) {
-      cb.onRawEvent({
-        eventType,
-        data: parsed,
-        raw: data,
-        timestamp: Date.now(),
-      });
-    }
-
-    switch (eventType) {
-      case 'text_delta':
-        cb.onTextDelta(parsed.delta);
-        break;
-      case 'tool_called':
-        cb.onToolCalled(parsed.tool);
-        break;
-      case 'image':
-        if (typeof parsed?.base64 === 'string' && typeof parsed?.imageId === 'string') {
-          cb.onImage({
-            imageId:    parsed.imageId,
-            base64:     parsed.base64,
-            mimeType:   typeof parsed.mimeType === 'string' ? parsed.mimeType : 'image/png',
-            size:       typeof parsed.size === 'number' ? parsed.size : 0,
-            toolName:   typeof parsed.toolName === 'string' ? parsed.toolName : undefined,
-            toolCallId: typeof parsed.toolCallId === 'string' ? parsed.toolCallId : undefined,
-          });
-        }
-        break;
-      case 'error':
-        cb.onError(new Error(parsed.message || 'agent returned error'));
-        break;
-      case 'done':
-        markDone();
-        cb.onDone();
-        break;
-    }
-  } catch {
-    if (cb.onRawEvent) {
-      cb.onRawEvent({
-        eventType,
-        data: null,
-        raw: data,
-        timestamp: Date.now(),
-      });
-    }
+  switch (event.type) {
+    case 'text-delta':
+    case 'text_delta':
+      callbacks.onTextDelta?.(event.delta ?? '');
+      break;
+    case 'tool-input-available':
+      callbacks.onToolInput?.(
+        event.toolCallId ?? '',
+        event.toolName ?? '',
+        event.input ?? '',
+      );
+      break;
+    case 'tool-output-available':
+      callbacks.onToolOutput?.(event.toolCallId ?? '', event.output ?? '');
+      break;
+    case 'finish':
+    case 'done':
+      markFinish();
+      callbacks.onFinish?.(event.stopped);
+      break;
+    case 'error':
+      callbacks.onError?.(new Error(event.errorText || 'stream error'));
+      break;
+    default:
+      break;
   }
 }
 
 /**
- * Request the backend to abort the currently running agent
- *
- * Note: the stop request header must NOT carry the same conversation_id as chat,
- * otherwise the runtime will overwrite chat's cancel_event with stop's cancel_event.
- * The target conversation_id is passed only via the request body.
+ * Request the backend to abort the currently running Agent.
  */
-export async function stopAgent(conversationId?: string): Promise<boolean> {
+export async function stopAgent(conversationId: string): Promise<boolean> {
   try {
-    /**
-     * EdgeOne agents/ runtime requires Markers-Conversation-Id on every
-     * agents/* request (since 2026-06-05 platform upgrade) — without it
-     * the runtime returns 400 (`AGENT_CONVERSATION_ID_REQUIRED`) before
-     * the handler runs.
-     *
-     * Earlier comments in this codebase warned that adding the header on
-     * /stop would overwrite chat's abort signal slot. The new runtime is
-     * expected to no longer have that bug; if you observe stop succeeding
-     * but chat not actually aborting, revisit this and use a different
-     * cancellation channel.
-     */
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (conversationId) {
-      headers['makers-conversation-id'] = conversationId;
-    }
-    const res = await fetch(API.chatStop, {
+    const res = await fetch(API.stop, {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conversation_id: conversationId }),
     });
     return res.ok;
