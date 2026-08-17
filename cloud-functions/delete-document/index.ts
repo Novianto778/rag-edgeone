@@ -1,11 +1,9 @@
 /**
  * POST & DELETE /delete-document — EdgeOne Makers Node Cloud Function.
  *
- * Deletes points from Qdrant Cloud and removes files from local uploads/blob storage.
+ * Deletes points from Qdrant Cloud and removes blobs from EdgeOne Blob Storage (context.store).
  */
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { createLogger } from '../_logger';
 import { deleteDocumentPoints } from '../../agents/_qdrant';
 
@@ -16,8 +14,6 @@ const JSON_HEADERS = { 'Content-Type': 'application/json; charset=UTF-8' } as co
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
-
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
 
 async function handleDelete(context: any): Promise<Response> {
   try {
@@ -46,30 +42,18 @@ async function handleDelete(context: any): Promise<Response> {
       }
     }
 
-    // 2. Delete file from local disk
-    if (fs.existsSync(UPLOADS_DIR)) {
-      const files = fs.readdirSync(UPLOADS_DIR);
-      for (const file of files) {
-        const ext = path.extname(file);
-        const stem = path.basename(file, ext);
-        if (stem === docId || file === storedName || file.startsWith(docId)) {
-          try {
-            fs.unlinkSync(path.join(UPLOADS_DIR, file));
-            deletedCount += 1;
-            logger.log(`Deleted local file: ${file}`);
-          } catch (unlinkErr) {
-            logger.warn(`Failed to delete local file ${file}:`, unlinkErr);
-          }
-        }
-      }
-    }
-
-    // 3. Delete from context.store if available
+    // 2. Delete from EdgeOne Pages Blob Store (context.store) if available
     try {
-      if (context.store?.delete) {
-        if (storedName) await context.store.delete(`uploads/${storedName}`);
-        if (docId) await context.store.delete(`uploads/${docId}.pdf`);
-        if (docId) await context.store.delete(`uploads/${docId}.docx`);
+      const store = context?.store || context?.agent?.store;
+      if (store?.delete) {
+        if (storedName) {
+          await store.delete(`uploads/${storedName}`);
+          deletedCount += 1;
+        }
+        if (docId) {
+          await store.delete(`uploads/${docId}.pdf`);
+          await store.delete(`uploads/${docId}.docx`);
+        }
       }
     } catch (storeErr) {
       logger.warn('context.store delete notice:', storeErr);

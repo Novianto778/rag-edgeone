@@ -1,7 +1,7 @@
 /**
  * Firecrawl Document Parsing Module for TypeScript.
  *
- * Uses official Firecrawl SDK v2 to parse PDF/DOCX files into structured Markdown.
+ * Uses official Firecrawl SDK v2 to parse PDF/DOCX files into structured Markdown in-memory.
  */
 
 import { Firecrawl } from '@mendable/firecrawl-js';
@@ -10,16 +10,18 @@ import { createLogger } from './_logger';
 
 const logger = createLogger('parser');
 
-const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || '';
+function getFirecrawlApiKey(): string {
+  return process.env.FIRECRAWL_API_KEY || '';
+}
 
 /**
- * Parse a PDF or DOCX file to clean Markdown using Firecrawl.
+ * Parse a PDF or DOCX file (Buffer or filepath) to clean Markdown using Firecrawl.
  */
 export async function parseDocumentToMarkdownViaFirecrawl(
-  filePath: string,
+  fileInput: Buffer | string,
   fileName: string,
 ): Promise<string> {
-  const apiKey = FIRECRAWL_API_KEY || process.env.FIRECRAWL_API_KEY || '';
+  const apiKey = getFirecrawlApiKey();
 
   if (!apiKey) {
     throw new Error('FIRECRAWL_API_KEY is required but not configured.');
@@ -29,7 +31,15 @@ export async function parseDocumentToMarkdownViaFirecrawl(
 
   try {
     const app = new Firecrawl({ apiKey });
-    const fileBuffer = fs.readFileSync(filePath);
+    
+    let fileBuffer: Buffer;
+    if (Buffer.isBuffer(fileInput)) {
+      fileBuffer = fileInput;
+    } else if (typeof fileInput === 'string' && fs.existsSync(fileInput)) {
+      fileBuffer = fs.readFileSync(fileInput);
+    } else {
+      throw new Error(`Invalid file input for ${fileName}`);
+    }
 
     const result = await app.parse(
       {
