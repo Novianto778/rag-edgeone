@@ -1,9 +1,10 @@
 /**
  * POST & DELETE /delete-document — EdgeOne Makers Node Cloud Function.
  *
- * Deletes points from Qdrant Cloud and removes blobs from EdgeOne Blob Storage (context.store).
+ * Deletes objects from EdgeOne Pages Blob Storage (@edgeone/pages-blob) and points from Qdrant Cloud.
  */
 
+import { getStore } from '@edgeone/pages-blob';
 import { createLogger } from '../_logger';
 import { deleteDocumentPoints } from '../../agents/_qdrant';
 
@@ -13,6 +14,11 @@ const JSON_HEADERS = { 'Content-Type': 'application/json; charset=UTF-8' } as co
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+}
+
+function getBlobStore() {
+  const storeName = process.env.BLOB_STORE_NAME || 'uploads';
+  return getStore(storeName);
 }
 
 async function handleDelete(context: any): Promise<Response> {
@@ -42,21 +48,21 @@ async function handleDelete(context: any): Promise<Response> {
       }
     }
 
-    // 2. Delete from EdgeOne Pages Blob Store (context.store) if available
+    // 2. Delete binary and metadata from EdgeOne Pages Blob Storage
     try {
-      const store = context?.store || context?.agent?.store;
-      if (store?.delete) {
-        if (storedName) {
-          await store.delete(`uploads/${storedName}`);
-          deletedCount += 1;
-        }
-        if (docId) {
-          await store.delete(`uploads/${docId}.pdf`);
-          await store.delete(`uploads/${docId}.docx`);
-        }
+      const blobStore = getBlobStore();
+      if (storedName) {
+        await blobStore.delete(`uploads/${storedName}`);
+        deletedCount += 1;
+      }
+      if (docId) {
+        await blobStore.delete(`uploads/${docId}.pdf`);
+        await blobStore.delete(`uploads/${docId}.docx`);
+        await blobStore.delete(`metadata/${docId}.json`);
+        deletedCount += 1;
       }
     } catch (storeErr) {
-      logger.warn('context.store delete notice:', storeErr);
+      logger.warn('EdgeOne Blob Storage delete notice:', storeErr);
     }
 
     logger.log(`delete-document completed: docId="${docId}", deletedCount=${deletedCount}`);

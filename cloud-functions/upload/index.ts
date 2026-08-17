@@ -1,12 +1,13 @@
 /**
  * POST /upload — EdgeOne Makers Node Cloud Function.
  *
- * Receives raw PDF/DOCX files, stores them in EdgeOne Blob Storage (context.store),
+ * Receives raw PDF/DOCX files, persists them into EdgeOne Pages Blob Storage (@edgeone/pages-blob),
  * parses them in-memory to Markdown via Firecrawl SDK v2, runs Parent-Child chunking,
  * and indexes them into Qdrant Cloud.
  */
 
 import * as path from 'node:path';
+import { getStore } from '@edgeone/pages-blob';
 import { createLogger } from '../_logger';
 import { parseDocumentToMarkdownViaFirecrawl } from '../../agents/_parser';
 import {
@@ -21,6 +22,11 @@ const JSON_HEADERS = { 'Content-Type': 'application/json; charset=UTF-8' } as co
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+}
+
+function getBlobStore() {
+  const storeName = process.env.BLOB_STORE_NAME || 'uploads';
+  return getStore(storeName);
 }
 
 export async function onRequestPost(context: any): Promise<Response> {
@@ -44,7 +50,8 @@ export async function onRequestPost(context: any): Promise<Response> {
     const originalName = fileObj.name || 'document.pdf';
     const fileSize = fileObj.size;
 
-    const fileBuffer = Buffer.from(await fileObj.arrayBuffer());
+    const arrayBuffer = await fileObj.arrayBuffer();
+    const fileBuffer = Buffer.from(arrayBuffer);
     if (fileBuffer.length === 0) {
       return jsonResponse({ error: 'Uploaded file is empty' }, 400);
     }
@@ -52,31 +59,38 @@ export async function onRequestPost(context: any): Promise<Response> {
     const docId = `doc_${Date.now()}`;
     const ext = path.extname(originalName).toLowerCase() || '.pdf';
     const storedFilename = `${docId}${ext}`;
-    const blobKey = `uploads/${storedFilename}`;
+    const fileBlobKey = `uploads/${storedFilename}`;
+    const metaBlobKey = `metadata/${docId}.json`;
 
-    // 1. Persist to EdgeOne Pages Blob Store (context.store)
-    try {
-      const store = context.store || context.agent?.store;
-      if (store?.put) {
-        await store.put(blobKey, fileBuffer);
-        logger.log(`Persisted to EdgeOne store via put: ${blobKey}`);
-      } else if (store?.set) {
-        await store.set(blobKey, fileBuffer);
-        logger.log(`Persisted to EdgeOne store via set: ${blobKey}`);
-      }
-    } catch (storeErr) {
-      logger.warn('context.store persistence notice:', storeErr);
-    }
-
-    // 2. Parse in-memory via Firecrawl SDK v2 (No local disk write required)
+    // 1. Parse in-memory via Firecrawl SDK v2 (Zero local disk dependency)
     logger.log(`Parsing ${originalName} in-memory via Firecrawl...`);
     const markdownText = await parseDocumentToMarkdownViaFirecrawl(fileBuffer, originalName);
 
-    // 3. Section-Aware Parent-Child Chunking
+    // 2. Section-Aware Parent-Child Chunking
     logger.log('Performing Parent-Child hierarchical chunking...');
     const parentSections = splitMarkdownIntoParentSections(markdownText, docId, originalName);
     const childChunks = createChildChunksFromParents(parentSections);
     logger.log(`Generated ${parentSections.length} parent sections and ${childChunks.length} child chunks.`);
+
+    // 3. Persist to EdgeOne Pages Blob Storage (@edgeone/pages-blob)
+    try {
+      const blobStore = getBlobStore();
+      // Store raw file as ArrayBuffer
+      await blobStore.set(fileBlobKey, arrayBuffer);
+      // Store document metadata JSON
+      await blobStore.setJSON(metaBlobKey, {
+        docId,
+        docName: originalName,
+        storedName: storedFilename,
+        fileSize,
+        uploadedAt: new Date().toISOString(),
+        parentSections: parentSections.length,
+        childChunks: childChunks.length,
+      });
+      logger.log(`Successfully persisted to EdgeOne Blob Storage: ${fileBlobKey} & ${metaBlobKey}`);
+    } catch (storeErr) {
+      logger.warn('EdgeOne Blob Storage persistence notice:', storeErr);
+    }
 
     // 4. Qdrant Cloud Vector Indexing
     logger.log('Upserting child chunks to Qdrant Cloud with Mistral Embed dense vectors...');
@@ -92,8 +106,7 @@ export async function onRequestPost(context: any): Promise<Response> {
       storedName: storedFilename,
       fileSize,
       uploadedAt: new Date().toISOString(),
-      path: blobKey,
-      blobKey,
+      blobKey: fileBlobKey,
       parentSections: parentSections.length,
       childChunks: childChunks.length,
       qdrantPoints: upsertedPoints,
